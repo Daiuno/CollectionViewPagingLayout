@@ -34,9 +34,9 @@ public extension ScaleTransformViewOptions {
             )
         case .linear:
             return Self(
-                minScale: 0.6,
+                minScale: 0.8,
                 scaleRatio: 0.4,
-                translationRatio: CGPoint(x: 0.66, y: 0.2),
+                translationRatio: CGPoint(x: 0.9, y: 0.2),
                 maxTranslationRatio: CGPoint(x: 2, y: 0),
                 keepVerticalSpacingEqual: true,
                 keepHorizontalSpacingEqual: true,
@@ -77,8 +77,8 @@ public extension ScaleTransformViewOptions {
             )
         case .cylinder:
             return Self(
-                minScale: 0.55,
-                maxScale: 0.55,
+                minScale: 0.8,
+                maxScale: 0.8,
                 scaleRatio: 0,
                 translationRatio: .zero,
                 minTranslationRatio: .zero,
@@ -89,8 +89,8 @@ public extension ScaleTransformViewOptions {
             )
         case .invertedCylinder:
             return Self(
-                minScale: 1.2,
-                maxScale: 1.2,
+                minScale: 1.0,
+                maxScale: 1.0,
                 scaleRatio: 0,
                 translationRatio: .zero,
                 minTranslationRatio: .zero,
@@ -126,8 +126,8 @@ public extension ScaleTransformViewOptions {
                 )
                 
             return Self(
-                minScale: 0.7,
-                maxScale: 0.7,
+                minScale: 0.9,
+                maxScale: 0.9,
                 scaleRatio: 0,
                 translationRatio: .zero,
                 minTranslationRatio: .zero,

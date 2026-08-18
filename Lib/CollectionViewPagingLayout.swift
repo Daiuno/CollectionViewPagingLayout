@@ -66,7 +66,13 @@ public class CollectionViewPagingLayout: UICollectionViewLayout {
     
     private var currentScrollOffset: CGFloat {
         let visibleRect = self.visibleRect
-        return scrollDirection == .horizontal ? (visibleRect.minX / max(visibleRect.width, 1)) : (visibleRect.minY / max(visibleRect.height, 1))
+        if scrollDirection == .horizontal {
+            let leadingInset = collectionView?.contentInset.left ?? 0
+            return (visibleRect.minX + leadingInset) / max(visibleRect.width, 1)
+        } else {
+            let leadingInset = collectionView?.contentInset.top ?? 0
+            return (visibleRect.minY + leadingInset) / max(visibleRect.height, 1)
+        }
     }
     
     private var visibleRect: CGRect {
@@ -90,6 +96,10 @@ public class CollectionViewPagingLayout: UICollectionViewLayout {
     private var originalIsUserInteractionEnabled: Bool?
     private var contentOffsetObservation: NSKeyValueObservation?
 
+    deinit {
+        boundsObservation?.invalidate()
+        contentOffsetObservation?.invalidate()
+    }
 
     // MARK: Public functions
     
@@ -123,15 +133,20 @@ public class CollectionViewPagingLayout: UICollectionViewLayout {
     /// this fixes the zIndex issue more: https://stackoverflow.com/questions/12659301/uicollectionview-setlayoutanimated-not-preserving-zindex
     public func invalidateLayoutInBatchUpdate(invalidateOffset: Bool = false) {
         DispatchQueue.main.async { [weak self] in
-            if invalidateOffset,
-               let collectionView = self?.collectionView,
-               self?.isAnimating == false {
+            // Rotation / view teardown can destroy the data source after this work is scheduled.
+            // performBatchUpdates with empty updates then crashes with NSInternalInconsistencyException
+            // when item counts change (e.g. 1 → 0) because dataSource became nil.
+            guard let self,
+                  let collectionView = self.collectionView,
+                  collectionView.dataSource != nil else { return }
+
+            if invalidateOffset, !self.isAnimating {
                 let original = collectionView.contentOffset
                 collectionView.contentOffset = .init(x: original.x + 1, y: original.y + 1)
                 collectionView.contentOffset = original
             }
 
-            self?.collectionView?.performBatchUpdates({ [weak self] in
+            collectionView.performBatchUpdates({ [weak self] in
                 self?.invalidateLayout()
             })
         }
@@ -271,9 +286,13 @@ public class CollectionViewPagingLayout: UICollectionViewLayout {
         }
         let pageSize = scrollDirection == .horizontal ? visibleRect.width : visibleRect.height
         let contentSize = scrollDirection == .horizontal ? collectionViewContentSize.width : collectionViewContentSize.height
-        let maxPossibleOffset = contentSize - pageSize
-        var offset = Double(pageSize) * Double(page)
-        offset = max(0, offset)
+        let leadingInset = scrollDirection == .horizontal ?
+            (collectionView?.contentInset.left ?? 0) :
+            (collectionView?.contentInset.top ?? 0)
+        let minPossibleOffset = -leadingInset
+        let maxPossibleOffset = contentSize - pageSize - leadingInset
+        var offset = Double(pageSize) * Double(page) - Double(leadingInset)
+        offset = max(Double(minPossibleOffset), offset)
         offset = min(offset, Double(maxPossibleOffset))
         let contentOffset: CGPoint = scrollDirection == .horizontal ? CGPoint(x: offset, y: 0) : CGPoint(x: 0, y: offset)
 
