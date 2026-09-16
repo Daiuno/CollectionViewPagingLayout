@@ -94,11 +94,11 @@ public class CollectionViewPagingLayout: UICollectionViewLayout {
     private var lastBounds: CGRect?
     private var currentViewAnimatorCancelable: ViewAnimatorCancelable?
     private var originalIsUserInteractionEnabled: Bool?
-    private var contentOffsetObservation: NSKeyValueObservation?
+    /// Bumps on every `setCurrentPage` so a cancelled animation cannot snap offset back.
+    private var pageSetGeneration: UInt64 = 0
 
     deinit {
         boundsObservation?.invalidate()
-        contentOffsetObservation?.invalidate()
     }
 
     // MARK: Public functions
@@ -138,7 +138,9 @@ public class CollectionViewPagingLayout: UICollectionViewLayout {
             // when item counts change (e.g. 1 → 0) because dataSource became nil.
             guard let self,
                   let collectionView = self.collectionView,
-                  collectionView.dataSource != nil else { return }
+                  collectionView.dataSource != nil,
+                  collectionView.window != nil,
+                  !collectionView.isHidden else { return }
 
             if invalidateOffset, !self.isAnimating {
                 let original = collectionView.contentOffset
@@ -277,13 +279,11 @@ public class CollectionViewPagingLayout: UICollectionViewLayout {
     }
     
     private func safelySetCurrentPage(_ page: Int, animated: Bool, animator: ViewAnimator?, completion: (() -> Void)? = nil) {
-        if isAnimating {
-            currentViewAnimatorCancelable?.cancel()
-            isAnimating = false
-            if let isEnabled = originalIsUserInteractionEnabled {
-            	collectionView?.isUserInteractionEnabled = isEnabled
-            }
-        }
+        pageSetGeneration += 1
+        let generation = pageSetGeneration
+        let wasAnimating = isAnimating
+        cancelCurrentPageAnimation()
+
         let pageSize = scrollDirection == .horizontal ? visibleRect.width : visibleRect.height
         let contentSize = scrollDirection == .horizontal ? collectionViewContentSize.width : collectionViewContentSize.height
         let leadingInset = scrollDirection == .horizontal ?
@@ -296,50 +296,84 @@ public class CollectionViewPagingLayout: UICollectionViewLayout {
         offset = min(offset, Double(maxPossibleOffset))
         let contentOffset: CGPoint = scrollDirection == .horizontal ? CGPoint(x: offset, y: 0) : CGPoint(x: 0, y: offset)
 
-        if animated {
-            isAnimating = true
+        // Match currentPage to the clamped offset so callers can chain pages while an animation is in flight.
+        var targetPage = page
+        if pageSize > 0 {
+            let actual = (scrollDirection == .horizontal ? contentOffset.x : contentOffset.y) + leadingInset
+            targetPage = Int(round(actual / pageSize))
         }
 
-        if animated, let animator = animator {
-            setContentOffset(with: animator, offset: contentOffset, completion: completion)
-        } else {
-            contentOffsetObservation = collectionView?.observe(\.contentOffset, options: [.new]) { [weak self] _, _ in
-                if self?.collectionView?.contentOffset == contentOffset {
-                    self?.contentOffsetObservation = nil
-                    DispatchQueue.main.async { [weak self] in
-                        self?.invalidateLayoutInBatchUpdate()
-                        self?.collectionView?.setContentOffset(contentOffset, animated: false)
-                        self?.isAnimating = false
-                        completion?()
-                    }
-                }
-            }
-            collectionView?.setContentOffset(contentOffset, animated: animated)
+        let alreadyAtTarget = collectionView.map { isOffset($0.contentOffset, closeTo: contentOffset) } ?? true
+        // Mark animating before assigning currentPage: onCurrentPageChanged may invalidate layout,
+        // and updateCurrentPageIfNeeded must not snap currentPage back to the old offset.
+        if animated, !alreadyAtTarget {
+            isAnimating = true
         }
-        
-        // this is necessary when we want to set the current page without animation
-        if !animated, page != currentPage {
-            invalidateLayoutInBatchUpdate()
+        if currentPage != targetPage {
+            currentPage = targetPage
+        }
+        if alreadyAtTarget {
+            completion?()
+            return
+        }
+
+        if animated {
+            // UIKit `setContentOffset(animated:)` cannot be retargeted; a second call is often ignored
+            // and the exact-offset KVO never fires, leaving isAnimating stuck and currentPage stale.
+            let pageAnimator: ViewAnimator
+            if let animator {
+                pageAnimator = animator
+            } else if wasAnimating {
+                // Keep velocity when chaining pages (key-repeat) instead of restarting ease-in.
+                pageAnimator = DefaultViewAnimator(0.18, curve: .linear)
+            } else {
+                pageAnimator = DefaultViewAnimator(0.25, curve: .easeInOut)
+            }
+            setContentOffset(with: pageAnimator, offset: contentOffset, generation: generation, completion: completion)
+        } else {
+            collectionView?.setContentOffset(contentOffset, animated: false)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, generation == self.pageSetGeneration else { return }
+                self.invalidateLayoutInBatchUpdate()
+                self.collectionView?.setContentOffset(contentOffset, animated: false)
+                completion?()
+            }
         }
     }
 
-    private func setContentOffset(with animator: ViewAnimator, offset: CGPoint, completion: (() -> Void)? = nil) {
+    private func cancelCurrentPageAnimation() {
+        currentViewAnimatorCancelable?.cancel()
+        currentViewAnimatorCancelable = nil
+        if isAnimating {
+            isAnimating = false
+            if let isEnabled = originalIsUserInteractionEnabled {
+                collectionView?.isUserInteractionEnabled = isEnabled
+            }
+            originalIsUserInteractionEnabled = nil
+        }
+    }
+
+    private func isOffset(_ lhs: CGPoint, closeTo rhs: CGPoint) -> Bool {
+        abs(lhs.x - rhs.x) < 0.5 && abs(lhs.y - rhs.y) < 0.5
+    }
+
+    private func setContentOffset(with animator: ViewAnimator, offset: CGPoint, generation: UInt64, completion: (() -> Void)? = nil) {
         guard let start = collectionView?.contentOffset else { return }
         let x = offset.x - start.x
         let y = offset.y - start.y
         originalIsUserInteractionEnabled = collectionView?.isUserInteractionEnabled ?? true
         collectionView?.isUserInteractionEnabled = false
         currentViewAnimatorCancelable = animator.animate { [weak self] progress, finished in
-            guard let collectionView = self?.collectionView else { return }
+            guard let self, generation == self.pageSetGeneration, let collectionView = self.collectionView else { return }
             collectionView.contentOffset = CGPoint(x: start.x + x * CGFloat(progress),
                                                    y: start.y + y * CGFloat(progress))
             if finished {
-                self?.currentViewAnimatorCancelable = nil
-                self?.isAnimating = false
-                self?.collectionView?.isUserInteractionEnabled = self?.originalIsUserInteractionEnabled ?? true
-                self?.originalIsUserInteractionEnabled = nil
-                self?.collectionView?.delegate?.scrollViewDidEndScrollingAnimation?(collectionView)
-                self?.invalidateLayoutInBatchUpdate()
+                self.currentViewAnimatorCancelable = nil
+                self.isAnimating = false
+                collectionView.isUserInteractionEnabled = self.originalIsUserInteractionEnabled ?? true
+                self.originalIsUserInteractionEnabled = nil
+                collectionView.delegate?.scrollViewDidEndScrollingAnimation?(collectionView)
+                self.invalidateLayoutInBatchUpdate()
                 completion?()
             }
         }
