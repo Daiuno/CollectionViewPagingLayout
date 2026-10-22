@@ -89,6 +89,10 @@ public class CollectionViewPagingLayout: UICollectionViewLayout {
     }
     
     private var currentPageCache: Int?
+    /// Page extent that the current `contentOffset` was built with. Bounds are already updated when a size change is reported, so this is the only record of the previous page width.
+    private var lastPageSize: CGFloat = 0
+    /// Set while rewriting offset for a new page size. Stops invalidation from deriving a page from the stale offset.
+    private var isApplyingSizeChange = false
     private var attributesCache: [(page: Int, attributes: UICollectionViewLayoutAttributes)]?
     private var boundsObservation: NSKeyValueObservation?
     private var lastBounds: CGRect?
@@ -157,8 +161,20 @@ public class CollectionViewPagingLayout: UICollectionViewLayout {
     
     // MARK: UICollectionViewLayout
     
+    override public func prepare() {
+        super.prepare()
+        if lastPageSize <= 0.5 {
+            let extent = currentPageExtent()
+            if extent > 0.5 {
+                lastPageSize = extent
+            }
+        }
+    }
+
     override public func shouldInvalidateLayout(forBoundsChange newBounds: CGRect) -> Bool {
-        if newBounds.size != visibleRect.size {
+        let newPageSize = pageExtent(of: newBounds.size)
+        // Bounds already equal `newBounds` here, so comparing with `visibleRect` never caches the page.
+        if lastPageSize > 0.5, newPageSize > 0.5, abs(newPageSize - lastPageSize) > 0.5 {
             currentPageCache = currentPage
         }
         return true
@@ -236,28 +252,56 @@ public class CollectionViewPagingLayout: UICollectionViewLayout {
     
     override public func invalidateLayout() {
         super.invalidateLayout()
+        guard !isApplyingSizeChange else { return }
         if let page = currentPageCache {
-            setCurrentPage(page, animated: false)
+            let extent = currentPageExtent()
+            if extent > 0.5, numberOfItems > 0, abs(extent - lastPageSize) > 0.5 {
+                currentPageCache = nil
+                isApplyingSizeChange = true
+                setCurrentPage(page, animated: false)
+                isApplyingSizeChange = false
+                lastPageSize = currentPageExtent()
+                return
+            }
+            // Size or items are not ready. Keep the cached page for the next invalidation.
+            if extent <= 0.5 || numberOfItems == 0 {
+                return
+            }
             currentPageCache = nil
-        } else {
-            updateCurrentPageIfNeeded()
         }
+        updateCurrentPageIfNeeded()
     }
     
     
     // MARK: Private functions
     
+    private func pageExtent(of size: CGSize) -> CGFloat {
+        scrollDirection == .horizontal ? size.width : size.height
+    }
+
+    private func currentPageExtent() -> CGFloat {
+        guard let collectionView else { return 0 }
+        return pageExtent(of: collectionView.bounds.size)
+    }
+
     private func updateCurrentPageIfNeeded() {
+        guard !isApplyingSizeChange, let collectionView else { return }
+        let boundsPageSize = currentPageExtent()
+        // Offset is still in the previous page size. Deriving a page from the new width jumps forward when the view shrinks.
+        if lastPageSize > 0.5, boundsPageSize > 0.5, abs(boundsPageSize - lastPageSize) > 0.5 {
+            return
+        }
         var currentPage: Int = 0
-        if let collectionView = collectionView {
-            let contentOffset = collectionView.contentOffset
-            let pageSize = scrollDirection == .horizontal ? collectionView.frame.width : collectionView.frame.height
-            let offset = scrollDirection == .horizontal ?
-                (contentOffset.x + collectionView.contentInset.left) :
-                (contentOffset.y + collectionView.contentInset.top)
-            if pageSize > 0 {
-                currentPage = Int(round(offset / pageSize))
-            }
+        let contentOffset = collectionView.contentOffset
+        let pageSize = scrollDirection == .horizontal ? collectionView.frame.width : collectionView.frame.height
+        let offset = scrollDirection == .horizontal ?
+            (contentOffset.x + collectionView.contentInset.left) :
+            (contentOffset.y + collectionView.contentInset.top)
+        if pageSize > 0 {
+            currentPage = Int(round(offset / pageSize))
+        }
+        if boundsPageSize > 0.5 {
+            lastPageSize = boundsPageSize
         }
         if currentPage != self.currentPage, !isAnimating {
             self.currentPage = currentPage
